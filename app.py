@@ -1,34 +1,70 @@
-# app.py
-import streamlit as st, openai, json, os
+# app.py  – Streamlit + OpenAI Assistants demo
+import streamlit as st
+import openai, json, time, os
+from pathlib import Path
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID   = "asst_..."
+# 1️⃣  ───────────────────────────────────────────────────────────────
+# Secure key handling
+openai.api_key = st.secrets["OPENAI_API_KEY"]      # store in .streamlit/secrets.toml
+ASSISTANT_ID   = st.secrets["ASSISTANT_ID"]        # created once; keep the id
 
-st.title("Consultant‑Match Demo")
+st.set_page_config(page_title="TalentMatch Demo", page_icon="🧩")
+st.title("🔎 TalentMatch – Team‑builder demo")
 
-project = st.text_area("Paste project brief")
-cv_files = st.file_uploader("Upload consultant CVs (.txt)", type="txt", accept_multiple_files=True)
+# 2️⃣  ───────────────────────────────────────────────────────────────
+# UI: project brief + batch CV upload
+project_brief = st.text_area("Paste the project brief", height=200)
+cv_files      = st.file_uploader(
+    "Upload consultant CVs (.txt)", type="txt", accept_multiple_files=True
+)
 
-if st.button("Generate team options") and project and cv_files:
-    cvs = [f.read().decode("utf‑8") for f in cv_files]
+if st.button("Generate team options", disabled=not(project_brief and cv_files)):
+    # 3️⃣  ───────────────────────────────────────────────────────────
+    # Read file contents
+    cvs = [f.read().decode("utf‑8", errors="ignore") for f in cv_files]
 
-    msg = {
-        "project_description": project,
+    user_payload = json.dumps({
+        "project_description": project_brief,
         "cvs": cvs
-    }
+    })
 
-    with st.spinner("Talking to TalentMatch‑GPT…"):
-        run = openai.beta.assistants.create_thread_and_run(
-            assistant_id=ASSISTANT_ID,
-            thread={"messages":[{"role":"user","content":json.dumps(msg)}]}
+    # 4️⃣  ───────────────────────────────────────────────────────────
+    # Create a new thread with the user message
+    try:
+        thread = openai.beta.threads.create(
+            messages=[{"role": "user", "content": user_payload}]
         )
+    except Exception as e:
+        st.error(f"Thread creation failed: {e}")
+        st.stop()
 
-        # simple polling; production → use webhooks
-        while run.status not in ("completed","failed"):
-            run = openai.beta.assistants.runs.retrieve(run.thread_id, run.id)
+    # 5️⃣  ───────────────────────────────────────────────────────────
+    # Start the run (stream=True for token streaming)
+    with st.spinner("Talking to TalentMatch‑GPT…"):
+        try:
+            stream = openai.beta.threads.runs.create(
+                thread_id=thread.id,
+                assistant_id=ASSISTANT_ID,
+                stream=True            # 🔥 real‑time tokens
+            )
+        except Exception as e:
+            st.error(f"Run failed: {e}")
+            st.stop()
 
-    if run.status=="completed":
-        answer = openai.beta.assistants.threads.messages.list(run.thread_id).data[0].content[0].text.value
-        st.markdown(answer, unsafe_allow_html=True)
-    else:
-        st.error("Assistant failed: "+run.last_error.message)
+        # 6️⃣  ───────────────────────────────────────────────────────
+        # Consume the stream chunk‑by‑chunk
+        response_md = st.empty()        # placeholder container
+        collected   = ""                # incremental buffer
+
+        for chunk in stream:
+            if "content" in chunk.delta:
+                token = chunk.delta.content
+                collected += token
+                response_md.markdown(collected, unsafe_allow_html=True)
+
+        # 7️⃣  ───────────────────────────────────────────────────────
+        st.success("Finished ✔")
+
+        # Optional: show the raw JSON if you want to debug
+        with st.expander("Raw response JSON"):
+            st.json(stream.done())
